@@ -1,0 +1,70 @@
+// Algorithm A: Threshold based cloud filtering raw GEE codebook
+
+// ########################################
+// ######  CLOUD CORRECTION v3  ######
+// ########################################
+
+// Threshold adjustment (lists of thresholds for blue and NIR bands)
+var blue_band_thresh_list = [750, 900, 1000]; // Blue band thresholds
+var nir_band_thresh_list = [2800, 3200, 3500]; // NIR band thresholds
+
+// Load your study area asset
+var study_area = ee.FeatureCollection(geometry);
+
+// Center the map on your study area
+Map.centerObject(study_area);
+
+// Function to apply cloud and shadow filtering based on given thresholds
+var filterCloudsByThreshold = function(img, blue_thresh, nir_thresh) {
+  var blueBand = img.select('B');
+  var nearBand = img.select('N');
+  
+  // Apply cloud and shadow masks
+  var cloudMask = blueBand.lte(blue_thresh);
+  var shadowMask = nearBand.lte(nir_thresh);
+  var combinedMask = cloudMask.and(shadowMask);
+  
+  return img.updateMask(combinedMask).set('system:time_start', img.get('system:time_start'));
+};
+
+// Function to export images to Google Drive
+var exportToDrive = function(image, description, folderName, blue_thresh, nir_thresh, date) {
+  Export.image.toDrive({
+    image: image,
+    description: description + '_Blue_' + blue_thresh + '_NIR_' + nir_thresh + '_' + date,
+    folder: folderName,
+    scale: 4.77,  // Resolution in meters
+    region: study_area.geometry(),  // Your study area
+    maxPixels: 1e13  // Max number of pixels to export
+  });
+};
+
+// Load the NICFI basemaps for the specified date range
+var nicfi_unfiltered = ee.ImageCollection('projects/planet-nicfi/assets/basemaps/asia')
+                .filter(ee.Filter.date('2020-09-01','2021-01-31')).map(function(image) {
+                            return image.clip(study_area);
+                            });
+
+// Function to apply threshold combinations and export to Drive
+var applyThresholdAndExport = function(blue_thresh, nir_thresh) {
+  var nicfi_filtered = nicfi_unfiltered.map(function(img) {
+    return filterCloudsByThreshold(img, blue_thresh, nir_thresh);
+  });
+  
+  // Export the images for cloudy and non-cloudy periods
+  var cloudy_nicfi = nicfi_filtered.filter(ee.Filter.date('2020-09-01','2020-09-30')).first();
+  var noncloudy_nicfi = nicfi_filtered.filter(ee.Filter.date('2021-01-01','2021-01-31')).first();
+
+  // Export cloudy image to Google Drive
+  exportToDrive(cloudy_nicfi, 'Cloudy_NICFI', 'cloud_correction_experiment', blue_thresh, nir_thresh, '2020-09');
+  
+  // Export non-cloudy image to Google Drive
+  exportToDrive(noncloudy_nicfi, 'NonCloudy_NICFI', 'cloud_correction_experiment', blue_thresh, nir_thresh, '2021-01');
+};
+
+// Loop through all combinations of blue and NIR thresholds and export
+blue_band_thresh_list.forEach(function(blue_thresh) {
+  nir_band_thresh_list.forEach(function(nir_thresh) {
+    applyThresholdAndExport(blue_thresh, nir_thresh);
+  });
+});
