@@ -1,0 +1,88 @@
+// Algorithm B: Stat-thresholding based cloud filtering raw GEE codebook
+
+// ########################################
+// ######  CLOUD CORRECTION with Sentinel 2  ######
+// ########################################
+
+// ##################################################
+
+///////////////////////////////////////////////////////
+// 1. Load your NICFI layers
+var nicfiFiltered   = ee.Image("projects/ee-islamkm/assets/Cloudy_NICFI_Blue_900_NIR_3500_2020-09");
+var nicfiUnfiltered = ee.Image("projects/ee-islamkm/assets/cloudy_nicfi_unfiltered");
+
+Map.addLayer(nicfiFiltered, {}, "nicfiFiltered")
+// Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
+
+function scalingNicfi(image) {
+
+  return image.multiply(0.0001);
+}
+
+nicfiUnfiltered = scalingNicfi(nicfiUnfiltered)
+nicfiFiltered = scalingNicfi(nicfiFiltered)
+Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
+//////////////////
+
+// 2. Build a Sentinel-2 median composite for Sep 2020, cloud‐masked
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBit   = 1 << 10;
+  var cirrusBit  = 1 << 11;
+  var clearMask = qa.bitwiseAnd(cloudBit).eq(0)
+                .and(qa.bitwiseAnd(cirrusBit).eq(0));
+  return image.updateMask(clearMask).divide(10000);
+}
+
+// 3. Build your Sentinel‑2 median and stats:
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+           .filterDate('2020-08-01','2020-11-30')
+           .filterBounds(nicfiFiltered.geometry())
+           .map(maskS2clouds)
+           .select(['B2', 'B3', 'B4', 'B8'])   // B2 = Blue, B8 = NIR
+           .median();
+
+var stats = s2.reduceRegion({
+  reducer: ee.Reducer.mean().combine(ee.Reducer.stdDev(), '', true),
+  geometry: nicfiFiltered.geometry(),
+  scale: 10,
+  maxPixels: 1e9
+});
+
+// 4. Extract means & stdDevs for just Blue & NIR
+var bands   = ['B2', 'B3', 'B4', 'B8'];
+var sigma   = 1;
+
+var means   = bands.map(function(b){ return ee.Number(stats.get(b + '_mean')); });
+var stdDevs = bands.map(function(b){ return ee.Number(stats.get(b + '_stdDev')); });
+
+// 5. Build per‑band threshold constants = mean + σ·stdDev
+var thresholds = means.map(function(m, i) {
+  return ee.Number(m).add( ee.Number(stdDevs[i]).multiply(sigma) );
+});
+
+// 6. Make a 2‑band constant threshold image
+var threshImg = ee.Image.constant(thresholds)
+                     .rename(bands)
+                     .toFloat();
+
+
+// 7. Grab NICFI’s bands
+var nicfi2 = nicfiUnfiltered.select(['b1', 'b2', 'b3', 'b4'])  
+                     .toFloat();
+
+// 8. Boolean mask where NICFI > S2_threshold
+var above2 = nicfi2.gt(threshImg);
+
+// 9. Collapse to single “bands above” mask
+var bothAbove = above2.reduce(ee.Reducer.max());  
+// (min()==1 only where both comparisons passed)
+
+// 10. Apply that mask back to NICFI so you keep pixels above threshold
+var nicfiAbove2 = nicfi2.updateMask(bothAbove)
+                        .rename(['b1', 'b2', 'b3', 'b4']);   // restore original names
+
+// 11. Visualize
+Map.addLayer(nicfiAbove2,
+             {},
+             'NICFI > mean+σ·stdDev');
