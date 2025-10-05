@@ -1,0 +1,145 @@
+// ML Model Development Raw
+
+
+// ########################################
+// ######  CLOUD CORRECTION with Sentinel 2 with ML ######
+// ########################################
+
+// USER DEFINES
+// ##################################################
+
+///////////////////////////////////////////////////////
+// 1. Load the NICFI layers
+var nicfiFiltered   = ee.Image("projects/ee-islamkm/assets/Cloudy_NICFI_Blue_900_NIR_3500_2020-09");
+var nicfiUnfiltered = ee.Image("projects/ee-islamkm/assets/cloudy_nicfi_unfiltered");
+
+Map.addLayer(nicfiFiltered, {}, "nicfiFiltered")
+// Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
+
+function scalingNicfi(image) {
+
+  return image.multiply(0.0001);
+}
+
+nicfiUnfiltered = scalingNicfi(nicfiUnfiltered)
+Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
+//////////////////
+
+// 2. Build a Sentinel-2 median composite for Sep 2020, cloud‐masked
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBit   = 1 << 10;
+  var cirrusBit  = 1 << 11;
+  var clearMask = qa.bitwiseAnd(cloudBit).eq(0)
+                .and(qa.bitwiseAnd(cirrusBit).eq(0));
+  return image.updateMask(clearMask).divide(10000);
+}
+
+// 3. Build your Sentinel‑2 median:
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+           .filterDate('2020-08-01','2020-11-30')
+           .filterBounds(nicfiFiltered.geometry())
+           .map(maskS2clouds)
+           .select(['B2', 'B3', 'B4', 'B8'])   // B2 = Blue, B8 = NIR
+           .median();
+
+var multiband = nicfiUnfiltered.addBands(s2)
+print(multiband)
+
+var cloudPoints = feature;
+/// 4. Generate random non-cloud (background) points
+// Mask areas where B1 > 0
+var validB1 = nicfiFiltered.select('b1').gt(0);
+
+// 5. Convert the mask to a vector geometry
+var region = validB1.selfMask().reduceToVectors({
+  geometry: nicfiFiltered.geometry(),
+  scale: 100,
+  geometryType: 'polygon',
+  maxPixels: 1e13
+}).geometry();
+
+var nonCloudPoints = ee.FeatureCollection.randomPoints({
+  region: region,
+  points: 125,  // match the number of cloud points
+  seed: 42
+});
+
+Map.addLayer(nonCloudPoints)
+// 6. Sample the multiband image to exclude pixels that fall in cloud points
+nonCloudPoints = nonCloudPoints.map(function(f) {
+  return f.set('class', 0);
+});
+
+// 7. Merge positive and negative samples
+var allPoints = cloudPoints.merge(nonCloudPoints);
+
+// 8. Random split (70-30)
+var withRandom = allPoints.randomColumn('random');
+var trainingPoints = withRandom.filter(ee.Filter.lt('random', 0.7));
+var testingPoints = withRandom.filter(ee.Filter.gte('random', 0.7));
+
+// 9. Sample training data from image
+var trainingSamples = multiband.sampleRegions({
+  collection: trainingPoints,
+  properties: ['class'],
+  scale: 10,
+  tileScale: 2
+});
+
+// 10. Train Random Forest
+var classifier = ee.Classifier.smileRandomForest(500)
+  .train({
+    features: trainingSamples,
+    classProperty: 'class',
+    inputProperties: (multiband).bandNames() // .select(['b1', 'b2', 'b3', 'b4'])
+  });
+
+// 11. Apply to image
+var classified = (multiband).classify(classifier); //.select(['b1', 'b2', 'b3', 'b4'])
+
+// 12. Test set sampling
+var testSamples = (multiband).sampleRegions({ //.select(['b1', 'b2', 'b3', 'b4'])
+  collection: testingPoints,
+  properties: ['class'],
+  scale: 10,
+  tileScale: 2
+});
+
+// 13. Classify test samples and evaluate
+var test = testSamples.classify(classifier);
+var confusionMatrix = test.errorMatrix('class', 'classification');
+print('Confusion Matrix:', confusionMatrix);
+print('Accuracy:', confusionMatrix.accuracy());
+
+// 14. Mask non-cloud pixels (i.e., keep only class 1)
+var cloudMask = classified.updateMask(classified.eq(1));
+
+// 15. Visualize cloud pixels in red
+Map.centerObject(cloudPoints, 8);
+Map.addLayer(cloudMask, {palette: ['red']}, 'Detected Clouds');
+
+// 16. VIMP CALCULATION //
+print(classifier.explain(), 'Explain 2:')
+
+var importance = ee.Dictionary(classifier.explain().get('importance'))
+
+var sum = importance.values().reduce(ee.Reducer.sum())
+
+var relativeImportance = importance.map(function(key, val) {
+   return (ee.Number(val).multiply(100)).divide(sum)
+  })
+print(relativeImportance, 'Relative Importance')
+
+var importanceFc = ee.FeatureCollection([
+  ee.Feature(null, relativeImportance)
+])
+
+var chart2 = ui.Chart.feature.byProperty({
+  features: importanceFc
+}).setOptions({
+      title: 'RF Variable Importance - Method 2',
+      vAxis: {title: 'Importance'},
+      hAxis: {title: 'Bands'}
+  })
+print(chart2, 'Relative Importance')
