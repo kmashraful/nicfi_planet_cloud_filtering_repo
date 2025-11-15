@@ -2,10 +2,10 @@
 Reproducible cloud and haze filtering for Planet-NICFI basemaps on Google Earth Engine. Implements two simple, training-free algorithms — a conservative Blue–NIR threshold and a Sentinel-2–derived adaptive statistical filter — for large-scale tropical monitoring and operational use.
 
 GEE Codebooks and assets:
-Algorithm A: Threshold based cloud filtering raw GEE codebook: https://code.earthengine.google.com/4b3a8ab88460dc61bafbe625f0431f49 
+Algorithm A: Threshold based cloud filtering raw GEE codebook: https://code.earthengine.google.com/a2e63af30378ed620f4e54f22e616f56
 
 Algorithm B: Stat-thresholding based cloud filtering raw GEE codebook:
-https://code.earthengine.google.com/c8221de39bf52f16b9ee78176271f319
+https://code.earthengine.google.com/02e71ce9205920d9936b662bea784219
 
 ML Model Development Raw:
 https://code.earthengine.google.com/1f0884f760b076e30a1e70a8b6a701e7 
