@@ -1,7 +1,10 @@
 // Algorithm B: Stat-thresholding based cloud filtering raw GEE codebook
 
-// ########################################
-// ######  CLOUD CORRECTION with Sentinel 2  ######
+var imageVisParam = {"opacity":1,"bands":["b1"],"palette":["ff1717"]},
+    raw = {"opacity":1,"bands":["b3","b2","b1"],"min":0.02417241726341106,"max":0.1051056713146775,"gamma":1};
+
+// ###############################################
+// ######  CLOUD CORRECTION with Sentinel 2 v2  ######
 // ########################################
 
 // ##################################################
@@ -11,7 +14,7 @@
 var nicfiFiltered   = ee.Image("projects/ee-islamkm/assets/Cloudy_NICFI_Blue_900_NIR_3500_2020-09");
 var nicfiUnfiltered = ee.Image("projects/ee-islamkm/assets/cloudy_nicfi_unfiltered");
 
-Map.addLayer(nicfiFiltered, {}, "nicfiFiltered")
+// Map.addLayer(nicfiFiltered, {}, "nicfiFiltered")
 // Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
 
 function scalingNicfi(image) {
@@ -21,7 +24,28 @@ function scalingNicfi(image) {
 
 nicfiUnfiltered = scalingNicfi(nicfiUnfiltered)
 nicfiFiltered = scalingNicfi(nicfiFiltered)
-Map.addLayer(nicfiUnfiltered, {}, "nicfiUnfiltered")
+Map.addLayer(nicfiUnfiltered, raw, "nicfiUnfiltered")
+//////////////////
+// === USER-CONTROLLED MONTH / YEAR ===
+// year_considered : integer year for the target month (e.g., 2020).
+// month_considered: integer month for the target period, 1..12 (e.g., 9 for September).
+// NOTE: these two variables may be set manually, or parsed automatically from NICFI metadata
+//       if you have that available. Here we show manual assignment for clarity.
+var year_considered = 2020;
+var month_considered = 9; // 1 = Jan, 9 = Sep, 12 = Dec
+
+
+
+// Build a base ee.Date at the first day of the chosen month
+var base = ee.Date.fromYMD(year_considered, month_considered, 1);
+
+// Start = first day of previous month (base - 1 month)
+var startDate = base.advance(-1, 'month').advance(0, 'day'); // first day of prev month
+
+// End = last day of (month_considered + 2)
+// Step 1: move to first day of month_considered+2
+// Step 2: step back one day to get last day of that month
+var endDate = base.advance(2, 'month').advance(-1, 'day');
 //////////////////
 
 // 2. Build a Sentinel-2 median composite for Sep 2020, cloud‐masked
@@ -36,7 +60,7 @@ function maskS2clouds(image) {
 
 // 3. Build your Sentinel‑2 median and stats:
 var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-           .filterDate('2020-08-01','2020-11-30')
+           .filterDate(startDate, endDate)
            .filterBounds(nicfiFiltered.geometry())
            .map(maskS2clouds)
            .select(['B2', 'B3', 'B4', 'B8'])   // B2 = Blue, B8 = NIR
@@ -51,38 +75,63 @@ var stats = s2.reduceRegion({
 
 // 4. Extract means & stdDevs for just Blue & NIR
 var bands   = ['B2', 'B3', 'B4', 'B8'];
-var sigma   = 1;
+// --- sigma sweep: multiple filters ---
+// sigma values to test (user-changeable)
+var sigmaValues = [0.5, 1, 2, 3];
 
-var means   = bands.map(function(b){ return ee.Number(stats.get(b + '_mean')); });
-var stdDevs = bands.map(function(b){ return ee.Number(stats.get(b + '_stdDev')); });
+// make sure means & stdDevs are ee.Lists (they may currently be client-side JS arrays)
+var meansList   = ee.List(bands.map(function(b){ return ee.Number(stats.get(b + '_mean')); }));
+var stdDevsList = ee.List(bands.map(function(b){ return ee.Number(stats.get(b + '_stdDev')); }));
 
-// 5. Build per‑band threshold constants = mean + σ·stdDev
-var thresholds = means.map(function(m, i) {
-  return ee.Number(m).add( ee.Number(stdDevs[i]).multiply(sigma) );
+// 5. NICFI source as float once (reuse)
+var nicfi2 = nicfiUnfiltered.select(['b1', 'b2', 'b3', 'b4']).toFloat();
+
+// object to keep results (client-side object with ee.Image values)
+var nicfiAboveBySigma = {};
+
+// 6. loop client-side over sigma values and create layers
+sigmaValues.forEach(function(s) {
+  var sigma = ee.Number(s);
+
+  // Build threshold list per band: mean + sigma * stdDev
+  // zip meansList and stdDevsList -> list of [mean, stdDev] pairs, then map to computed threshold
+  var thresholds = meansList.zip(stdDevsList).map(function(pair) {
+    pair = ee.List(pair);
+    var m = ee.Number(pair.get(0));
+    var sd = ee.Number(pair.get(1));
+    return m.add(sd.multiply(sigma));
+  });
+
+  // constant threshold image with same band names
+  var threshImg = ee.Image.constant(thresholds).rename(bands).toFloat();
+
+  // boolean where NICFI band > S2 threshold (per-band)
+  var above2 = nicfi2.gt(threshImg);
+
+  // reduce to single mask where any band is above the corresponding threshold
+  // (you used Reducer.max() previously; keep same behaviour)
+  var bothAbove = above2.reduce(ee.Reducer.max());
+
+  // apply mask and restore names
+  var nicfiAbove2 = nicfi2.updateMask(bothAbove).rename(['b1', 'b2', 'b3', 'b4']);
+
+  // store for later programmatic use
+  nicfiAboveBySigma['sigma_' + String(s)] = nicfiAbove2;
+  
+  
+  Export.image.toDrive({
+    image: nicfiAbove2,
+    description: 'sig_' + String(s) + '_Filtered_AlgB',
+    folder: 'GEE_NICFI_BD',
+    fileNamePrefix: 'sig_' + String(s) +'cloudy_Filtered_AlgB',
+    region: nicfiFiltered.geometry(),
+    scale: 4.77,
+    maxPixels: 1e13,
+
+  });
+  // add layer to map
+  Map.addLayer(nicfiAbove2, imageVisParam, 'NICFI > mean+' + String(s) + 'σ');
 });
 
-// 6. Make a 2‑band constant threshold image
-var threshImg = ee.Image.constant(thresholds)
-                     .rename(bands)
-                     .toFloat();
-
-
-// 7. Grab NICFI’s bands
-var nicfi2 = nicfiUnfiltered.select(['b1', 'b2', 'b3', 'b4'])  
-                     .toFloat();
-
-// 8. Boolean mask where NICFI > S2_threshold
-var above2 = nicfi2.gt(threshImg);
-
-// 9. Collapse to single “bands above” mask
-var bothAbove = above2.reduce(ee.Reducer.max());  
-// (min()==1 only where both comparisons passed)
-
-// 10. Apply that mask back to NICFI so you keep pixels above threshold
-var nicfiAbove2 = nicfi2.updateMask(bothAbove)
-                        .rename(['b1', 'b2', 'b3', 'b4']);   // restore original names
-
-// 11. Visualize
-Map.addLayer(nicfiAbove2,
-             {},
-             'NICFI > mean+σ·stdDev');
+// (optional) inspect the object keys in the console
+// print('NICFI results by sigma (JS object):', nicfiAboveBySigma);
